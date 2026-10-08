@@ -37,6 +37,13 @@ services:
       - /run/beszel-hid-ups:/sys/class/power_supply:ro
 ```
 
+## Logs
+
+Only changes are logged: UPS found or lost, read and write errors, on battery or on mains.
+
+- OpenRC: `/var/log/beszel-hid-ups.log`
+- systemd: `journalctl -u beszel-hid-ups`
+
 ## How it works
 
 The Beszel agent reads batteries from `/sys/class/power_supply`, where Linux does not list USB UPS. Whenever the UPS signals a change, and at least every 30 seconds, `beszel-hid-ups` reads the UPS through `/dev/hidraw*` and writes the same files a battery driver would:

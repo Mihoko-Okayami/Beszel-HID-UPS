@@ -5,3 +5,4 @@ name="beszel-hid-ups"
 description="Publishes USB HID UPS battery status for the Beszel agent container"
 
 command="/usr/local/sbin/beszel-hid-ups"
+error_log="/var/log/${RC_SVCNAME}.log"

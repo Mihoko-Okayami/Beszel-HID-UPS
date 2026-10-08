@@ -6,7 +6,9 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -87,6 +89,7 @@ struct ups {
 
 static volatile sig_atomic_t running = 1;
 static sigset_t unblocked;
+static char problem[80];
 
 static void stop(int sig)
 {
@@ -94,19 +97,43 @@ static void stop(int sig)
 	running = 0;
 }
 
+__attribute__((format(printf, 1, 2)))
+static void note(const char *format, ...)
+{
+	char stamp[32] = "", message[256];
+	time_t now = time(NULL);
+	struct tm *local = localtime(&now);
+	va_list args;
+
+	if (local && !getenv("JOURNAL_STREAM"))
+		strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S ", local);
+	va_start(args, format);
+	vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	fprintf(stderr, "%s%s\n", stamp, message);
+}
+
 static int put(int dir, const char *name, const char *value)
 {
+	static int failing;
 	char tmp[32];
-	int fd, ok;
+	int fd, ok = 0;
 
 	snprintf(tmp, sizeof(tmp), ".%s", name);
 	fd = openat(dir, tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (fd < 0)
-		return 0;
-	ok = dprintf(fd, "%s\n", value) > 0;
-	if (close(fd) == 0 && ok && renameat(dir, tmp, dir, name) == 0)
+	if (fd >= 0) {
+		ok = dprintf(fd, "%s\n", value) > 0;
+		ok = close(fd) == 0 && ok && renameat(dir, tmp, dir, name) == 0;
+	}
+	if (ok) {
+		failing = 0;
 		return 1;
-	unlinkat(dir, tmp, 0);
+	}
+	if (!failing)
+		note("cannot write %s: %s", name, strerror(errno));
+	failing = 1;
+	if (fd >= 0)
+		unlinkat(dir, tmp, 0);
 	return 0;
 }
 
@@ -263,8 +290,10 @@ static int open_ups(struct ups *ups)
 			continue;
 		snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
 		ups->fd = open(path, O_RDONLY | O_NONBLOCK);
-		if (ups->fd >= 0)
-			read_model(entry->d_name, ups->model, sizeof(ups->model));
+		if (ups->fd < 0)
+			continue;
+		read_model(entry->d_name, ups->model, sizeof(ups->model));
+		note("UPS found on %s: %s", entry->d_name, ups->model);
 	}
 	closedir(dir);
 	return ups->fd >= 0;
@@ -286,18 +315,26 @@ static unsigned int extract(const struct ups *ups, const struct field *field)
 static int get_report(int fd, struct report *report)
 {
 	unsigned int size = report->bytes;
-	int length;
+	int length, error;
 
 	for (;;) {
 		report->data[0] = (unsigned char)report->id;
 		length = ioctl(fd, HIDIOCGFEATURE(size), report->data);
+		error = length < 0 ? errno : 0;
 		if (length >= (int)report->need && report->data[0] == report->id) {
+			if (size != report->bytes)
+				note("report 0x%02x: using %u-byte reads", report->id, size);
 			report->bytes = size;
 			return 1;
 		}
-		if (length < 0 && errno == ENODEV)
+		if (error)
+			snprintf(problem, sizeof(problem), "report 0x%02x: %s", report->id, strerror(error));
+		else
+			snprintf(problem, sizeof(problem), "report 0x%02x: unusable answer (length %d, need %u, id 0x%02x)",
+				report->id, length, report->need, report->data[0]);
+		if (error == ENODEV)
 			return -1;
-		if (size == MAX_REPORT || (length < 0 && errno != EOVERFLOW))
+		if (size == MAX_REPORT || (error && error != EOVERFLOW))
 			return 0;
 		size = MAX_REPORT;
 	}
@@ -331,15 +368,11 @@ static const char *status_name(const struct ups *ups, const unsigned int *values
 {
 	if (values[AC_PRESENT] && level == 100)
 		return "Full";
-	if (values[DISCHARGING])
+	if (values[DISCHARGING] || (ups->fields[AC_PRESENT].size && !values[AC_PRESENT]))
 		return "Discharging";
 	if (values[CHARGING])
 		return "Charging";
-	if (!ups->fields[AC_PRESENT].size)
-		return "Unknown";
-	if (!values[AC_PRESENT])
-		return "Discharging";
-	return "Not charging";
+	return ups->fields[AC_PRESENT].size ? "Not charging" : "Unknown";
 }
 
 static void wait_change(int fd, unsigned int seconds)
@@ -365,6 +398,7 @@ int main(int argc, char **argv)
 	unsigned int values[FIELD_COUNT];
 	struct ups ups = { .fd = -1 };
 	int base, out = -1, level, last_level = -1, result, failures = 0, quick = 0;
+	int battery, last_battery = -1, first = 1;
 	unsigned int i;
 	sigset_t blocked;
 	char text[8];
@@ -377,7 +411,7 @@ int main(int argc, char **argv)
 		close(base);
 	}
 	if (out < 0) {
-		perror(path);
+		note("%s: %s", path, strerror(errno));
 		return 1;
 	}
 	sigemptyset(&blocked);
@@ -391,10 +425,22 @@ int main(int argc, char **argv)
 		if (ups.fd < 0 && open_ups(&ups)) {
 			put(out, "type", "Battery");
 			put(out, "model_name", ups.model);
+		} else if (ups.fd < 0 && first) {
+			note("no UPS found, retrying every %d s", INTERVAL);
 		}
+		first = 0;
 		result = ups.fd >= 0 ? poll_ups(&ups, values) : -1;
+		if (result == 0 && !failures)
+			note("%s", problem);
 		if (result > 0) {
+			if (failures)
+				note("UPS readable again");
 			failures = 0;
+			battery = ups.fields[AC_PRESENT].size ? !values[AC_PRESENT] : values[DISCHARGING] != 0;
+			if (battery != last_battery) {
+				note(battery ? "on battery" : "on mains");
+				last_battery = battery;
+			}
 			level = charge_level(values);
 			status = status_name(&ups, values, level);
 			if (status != last_status && put(out, "status", status))
@@ -406,6 +452,10 @@ int main(int argc, char **argv)
 			}
 		} else if (result < 0 || ++failures >= MAX_FAILURES) {
 			if (ups.fd >= 0) {
+				if (result < 0)
+					note("UPS lost: unplugged");
+				else
+					note("UPS lost after %d failed reads", MAX_FAILURES);
 				quick = result < 0 && last_level >= 0 ? QUICK_RESCANS : 0;
 				close(ups.fd);
 			}
@@ -413,6 +463,7 @@ int main(int argc, char **argv)
 			failures = 0;
 			last_status = NULL;
 			last_level = -1;
+			last_battery = -1;
 			unlinkat(out, "capacity", 0);
 		}
 		if (ups.fd < 0 && quick > 0) {
