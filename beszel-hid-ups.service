@@ -1,0 +1,9 @@
+[Unit]
+Description=Publishes USB HID UPS battery status for the Beszel agent container
+
+[Service]
+ExecStart=/usr/local/sbin/beszel-hid-ups
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
