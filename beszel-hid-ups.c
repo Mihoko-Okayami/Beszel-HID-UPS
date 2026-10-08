@@ -1,4 +1,7 @@
+#define _GNU_SOURCE
+
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
@@ -7,12 +10,15 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <linux/hidraw.h>
 
 #define RUN_DIR "/run/beszel-hid-ups"
 #define INTERVAL 30
 #define SETTLE 1
+#define MAX_FAILURES 3
+#define QUICK_RESCANS 6
 #define MAX_REPORT 64
 #define MAX_USAGES 16
 #define MAX_DEPTH 4
@@ -67,6 +73,7 @@ struct field {
 struct report {
 	unsigned int id;
 	unsigned int bytes;
+	unsigned int need;
 	unsigned char data[MAX_REPORT];
 };
 
@@ -79,6 +86,7 @@ struct ups {
 };
 
 static volatile sig_atomic_t running = 1;
+static sigset_t unblocked;
 
 static void stop(int sig)
 {
@@ -86,7 +94,7 @@ static void stop(int sig)
 	running = 0;
 }
 
-static void put(int dir, const char *name, const char *value)
+static int put(int dir, const char *name, const char *value)
 {
 	char tmp[32];
 	int fd, ok;
@@ -94,12 +102,12 @@ static void put(int dir, const char *name, const char *value)
 	snprintf(tmp, sizeof(tmp), ".%s", name);
 	fd = openat(dir, tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0)
-		return;
+		return 0;
 	ok = dprintf(fd, "%s\n", value) > 0;
-	if (close(fd) == 0 && ok)
-		renameat(dir, tmp, dir, name);
-	else
-		unlinkat(dir, tmp, 0);
+	if (close(fd) == 0 && ok && renameat(dir, tmp, dir, name) == 0)
+		return 1;
+	unlinkat(dir, tmp, 0);
+	return 0;
 }
 
 static void add_fields(struct ups *ups, const struct state *state, const unsigned int *usages,
@@ -123,7 +131,7 @@ static void add_fields(struct ups *ups, const struct state *state, const unsigne
 static int link_reports(struct ups *ups, const unsigned int *bits)
 {
 	struct field *field;
-	unsigned int f, r, bytes;
+	unsigned int f, r, bytes, need;
 
 	for (f = 0; f < FIELD_COUNT; f++) {
 		field = &ups->fields[f];
@@ -135,8 +143,13 @@ static int link_reports(struct ups *ups, const unsigned int *bits)
 		r = 0;
 		while (r < ups->report_count && ups->reports[r].id != field->id)
 			r++;
-		if (r == ups->report_count)
+		if (r == ups->report_count) {
+			ups->reports[r].need = 0;
 			ups->report_count++;
+		}
+		need = 1 + (field->offset + field->size + 7) / 8;
+		if (ups->reports[r].need < need)
+			ups->reports[r].need = need;
 		ups->reports[r].id = field->id;
 		ups->reports[r].bytes = bytes;
 		field->report = r;
@@ -205,15 +218,20 @@ static int parse(struct ups *ups, const unsigned char *desc, unsigned int length
 	return link_reports(ups, bits);
 }
 
-static int is_ups(int fd, struct ups *ups)
+static int is_ups(const char *node, struct ups *ups)
 {
-	static struct hidraw_report_descriptor desc;
+	static unsigned char desc[HID_MAX_DESCRIPTOR_SIZE];
+	char path[PATH_MAX];
+	ssize_t length;
+	int fd;
 
-	if (ioctl(fd, HIDIOCGRDESCSIZE, &desc.size) < 0)
+	snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/report_descriptor", node);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
 		return 0;
-	if (ioctl(fd, HIDIOCGRDESC, &desc) < 0)
-		return 0;
-	return parse(ups, desc.value, desc.size);
+	length = read(fd, desc, sizeof(desc));
+	close(fd);
+	return length > 0 && parse(ups, desc, (unsigned int)length);
 }
 
 static void read_model(const char *node, char *model, int size)
@@ -235,25 +253,18 @@ static int open_ups(struct ups *ups)
 	char path[PATH_MAX];
 	struct dirent *entry;
 	DIR *dir;
-	int fd;
 
 	ups->fd = -1;
 	dir = opendir("/sys/class/hidraw");
 	if (!dir)
 		return 0;
 	while (ups->fd < 0 && (entry = readdir(dir))) {
-		if (strncmp(entry->d_name, "hidraw", 6))
+		if (strncmp(entry->d_name, "hidraw", 6) || !is_ups(entry->d_name, ups))
 			continue;
 		snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
-		fd = open(path, O_RDONLY | O_NONBLOCK);
-		if (fd < 0)
-			continue;
-		if (is_ups(fd, ups)) {
-			ups->fd = fd;
+		ups->fd = open(path, O_RDONLY | O_NONBLOCK);
+		if (ups->fd >= 0)
 			read_model(entry->d_name, ups->model, sizeof(ups->model));
-		} else {
-			close(fd);
-		}
 	}
 	closedir(dir);
 	return ups->fd >= 0;
@@ -274,21 +285,34 @@ static unsigned int extract(const struct ups *ups, const struct field *field)
 
 static int get_report(int fd, struct report *report)
 {
-	int length = (int)report->bytes;
+	unsigned int size = report->bytes;
+	int length;
 
-	report->data[0] = (unsigned char)report->id;
-	if (ioctl(fd, HIDIOCGFEATURE(report->bytes), report->data) != length)
-		return 0;
-	return report->data[0] == report->id;
+	for (;;) {
+		report->data[0] = (unsigned char)report->id;
+		length = ioctl(fd, HIDIOCGFEATURE(size), report->data);
+		if (length >= (int)report->need && report->data[0] == report->id) {
+			report->bytes = size;
+			return 1;
+		}
+		if (length < 0 && errno == ENODEV)
+			return -1;
+		if (size == MAX_REPORT || (length < 0 && errno != EOVERFLOW))
+			return 0;
+		size = MAX_REPORT;
+	}
 }
 
 static int poll_ups(struct ups *ups, unsigned int *values)
 {
 	unsigned int i;
+	int result;
 
-	for (i = 0; i < ups->report_count; i++)
-		if (!get_report(ups->fd, &ups->reports[i]))
-			return 0;
+	for (i = 0; i < ups->report_count; i++) {
+		result = get_report(ups->fd, &ups->reports[i]);
+		if (result <= 0)
+			return result;
+	}
 	for (i = 0; i < FIELD_COUNT; i++)
 		values[i] = ups->fields[i].size ? extract(ups, &ups->fields[i]) : 0;
 	return 1;
@@ -305,6 +329,8 @@ static int charge_level(const unsigned int *values)
 
 static const char *status_name(const struct ups *ups, const unsigned int *values, int level)
 {
+	if (values[AC_PRESENT] && level == 100)
+		return "Full";
 	if (values[DISCHARGING])
 		return "Discharging";
 	if (values[CHARGING])
@@ -313,33 +339,34 @@ static const char *status_name(const struct ups *ups, const unsigned int *values
 		return "Unknown";
 	if (!values[AC_PRESENT])
 		return "Discharging";
-	return level == 100 ? "Full" : "Not charging";
+	return "Not charging";
 }
 
-static void wait_change(int fd)
+static void wait_change(int fd, unsigned int seconds)
 {
 	struct pollfd event = { .fd = fd, .events = POLLIN };
+	struct timespec timeout = { .tv_sec = seconds };
+	struct timespec settle = { .tv_sec = SETTLE };
 	unsigned char report[MAX_REPORT];
 
-	if (fd < 0) {
-		sleep(INTERVAL);
+	if (ppoll(&event, 1, &timeout, &unblocked) <= 0)
 		return;
-	}
-	if (poll(&event, 1, INTERVAL * 1000) <= 0)
-		return;
-	sleep(SETTLE);
+	ppoll(NULL, 0, &settle, &unblocked);
 	while (read(fd, report, sizeof(report)) > 0)
 		continue;
 }
 
 int main(int argc, char **argv)
 {
+	static const int signals[] = { SIGHUP, SIGINT, SIGTERM };
 	struct sigaction action = { .sa_handler = stop };
 	const char *path = argc > 1 ? argv[1] : RUN_DIR;
 	const char *status, *last_status = NULL;
 	unsigned int values[FIELD_COUNT];
 	struct ups ups = { .fd = -1 };
-	int base, out = -1, level, last_level = -1;
+	int base, out = -1, level, last_level = -1, result, failures = 0, quick = 0;
+	unsigned int i;
+	sigset_t blocked;
 	char text[8];
 
 	mkdir(path, 0755);
@@ -353,34 +380,47 @@ int main(int argc, char **argv)
 		perror(path);
 		return 1;
 	}
-	sigaction(SIGINT, &action, NULL);
-	sigaction(SIGTERM, &action, NULL);
-	put(out, "type", "Battery");
+	sigemptyset(&blocked);
+	for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+		sigaction(signals[i], &action, NULL);
+		sigaddset(&blocked, signals[i]);
+	}
+	sigprocmask(SIG_BLOCK, &blocked, &unblocked);
 
 	while (running) {
-		if (ups.fd < 0 && open_ups(&ups))
+		if (ups.fd < 0 && open_ups(&ups)) {
+			put(out, "type", "Battery");
 			put(out, "model_name", ups.model);
-		if (ups.fd >= 0 && poll_ups(&ups, values)) {
+		}
+		result = ups.fd >= 0 ? poll_ups(&ups, values) : -1;
+		if (result > 0) {
+			failures = 0;
 			level = charge_level(values);
 			status = status_name(&ups, values, level);
-			if (status != last_status) {
-				put(out, "status", status);
+			if (status != last_status && put(out, "status", status))
 				last_status = status;
-			}
 			if (level != last_level) {
 				snprintf(text, sizeof(text), "%d", level);
-				put(out, "capacity", text);
-				last_level = level;
+				if (put(out, "capacity", text))
+					last_level = level;
 			}
-		} else {
-			if (ups.fd >= 0)
+		} else if (result < 0 || ++failures >= MAX_FAILURES) {
+			if (ups.fd >= 0) {
+				quick = result < 0 && last_level >= 0 ? QUICK_RESCANS : 0;
 				close(ups.fd);
+			}
 			ups.fd = -1;
+			failures = 0;
 			last_status = NULL;
 			last_level = -1;
 			unlinkat(out, "capacity", 0);
 		}
-		wait_change(ups.fd);
+		if (ups.fd < 0 && quick > 0) {
+			quick--;
+			wait_change(ups.fd, SETTLE);
+		} else {
+			wait_change(ups.fd, INTERVAL);
+		}
 	}
 	unlinkat(out, "capacity", 0);
 	return 0;
