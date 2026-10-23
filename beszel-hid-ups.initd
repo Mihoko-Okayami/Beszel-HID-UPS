@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+supervisor=supervise-daemon
+
+name="beszel-hid-ups"
+description="Publishes USB HID UPS battery status for the Beszel agent container"
+
+command="/usr/local/sbin/beszel-hid-ups"
+error_log="/var/log/${RC_SVCNAME}.log"
+respawn_delay=2
+respawn_max=0
+retry="TERM/30/KILL/5"
+
+stop_post() {
+	rm -f /run/beszel-hid-ups/ups/capacity
+}

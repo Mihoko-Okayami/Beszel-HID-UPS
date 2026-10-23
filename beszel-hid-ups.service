@@ -1,0 +1,33 @@
+[Unit]
+Description=Publishes USB HID UPS battery status for the Beszel agent container
+
+[Service]
+ExecStart=/usr/local/sbin/beszel-hid-ups
+ExecStopPost=-/bin/rm -f /run/beszel-hid-ups/ups/capacity
+Restart=always
+RestartSec=15s
+RuntimeDirectory=beszel-hid-ups
+RuntimeDirectoryPreserve=yes
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=ENOSYS
+
+[Install]
+WantedBy=multi-user.target
