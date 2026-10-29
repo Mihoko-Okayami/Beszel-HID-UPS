@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
 		if (ups.fd < 0 && quick > 0) {
 			quick--;
 			wait_change(ups.fd, SETTLE);
-		} else if (ups.fd >= 0 && ups.retry) {
+		} else if (ups.retry) {
 			wait_change(ups.fd, RETRY);
 		} else {
 			wait_change(ups.fd, INTERVAL);
