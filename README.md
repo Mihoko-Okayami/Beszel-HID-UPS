@@ -4,6 +4,8 @@ Shows a USB UPS battery in [Beszel](https://github.com/henrygd/beszel) when the 
 
 Works with USB UPS models that follow the HID Power Device class (APC, Eaton, CyberPower, ...).
 
+It shows one UPS, the first one found. It cannot run alongside NUT's `usbhid-ups` driver on the same UPS: that driver detaches the UPS from the kernel, so the log says `no UPS found` or `UPS lost: unplugged`.
+
 ## Install
 
 Download all files from the latest release. `beszel-hid-ups` runs on any x86_64 Linux. On ARM, such as a Raspberry Pi, use `beszel-hid-ups-aarch64` instead if `getconf LONG_BIT` prints 64, otherwise `beszel-hid-ups-armv7`, or `beszel-hid-ups-armv6` on a Raspberry Pi Zero or 1.
