@@ -34,6 +34,7 @@ jobs:
             for _ in $(seq 50); do grep -q "no UPS found" "$RUNNER_TEMP/$bin.log" && break; sleep 0.2; done
             kill "$!"
             wait "$!"
+            grep -q "no UPS found" "$RUNNER_TEMP/$bin.log"
             grep -q "stopped$" "$RUNNER_TEMP/$bin.log"
           done
       - uses: actions/attest@v4
