@@ -130,7 +130,7 @@ int poll_ups(struct ups *ups, unsigned int *values) {
 		}
 		report->valid |= result;
 		report->failing = result ? 0 : report->failing + 1;
-		if (!result && i == ups->fields[CHARGE].report) {
+		if (!result && !i) {
 			ups->retry |= report->valid || report->failing < MAX_FAILURES;
 			if (report->valid && report->failing < MAX_FAILURES) return HELD;
 			while (++i < ups->report_count) {
