@@ -61,22 +61,14 @@ static int link_reports(struct ups *ups, const unsigned int *bits) {
 			field->size = 0;
 		}
 		if (!field->size) continue;
-		r = 0;
-		while (r < ups->report_count && ups->reports[r].id != field->id) {
-			r++;
-		}
+		for (r = 0; r < ups->report_count && ups->reports[r].id != field->id; r++) continue;
 		if (r == ups->report_count) {
-			ups->reports[r].need = 0;
-			ups->reports[r].valid = 0;
-			ups->reports[r].failing = 0;
-			ups->report_count++;
+			ups->reports[ups->report_count++] = (struct report){ .id = field->id, .bytes = bytes };
 		}
 		need = 1 + (field->offset + field->size + 7) / 8;
 		if (ups->reports[r].need < need) {
 			ups->reports[r].need = need;
 		}
-		ups->reports[r].id = field->id;
-		ups->reports[r].bytes = bytes;
 		field->report = r;
 	}
 	return ups->fields[CHARGE].size != 0;
