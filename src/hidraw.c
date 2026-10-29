@@ -134,9 +134,7 @@ int poll_ups(struct ups *ups, unsigned int *values) {
 			ups->retry |= report->valid || report->failing < MAX_FAILURES;
 			if (report->valid && report->failing < MAX_FAILURES) return HELD;
 			while (++i < ups->report_count) {
-				if (ups->reports[i].valid && ups->reports[i].failing < MAX_FAILURES) {
-					ups->reports[i].failing = MAX_FAILURES;
-				}
+				ups->reports[i].valid = ups->reports[i].valid ? 2 : 0;
 			}
 			return STALE;
 		}
@@ -146,7 +144,7 @@ int poll_ups(struct ups *ups, unsigned int *values) {
 		if (!ups->fields[i].size || !report->failing) continue;
 		ups->retry |= report->failing < MAX_FAILURES || (report->valid && i != FULL_CHARGE);
 		held |= !report->valid && report->failing < MAX_FAILURES;
-		if (report->valid && report->failing >= MAX_FAILURES && i != FULL_CHARGE) return STALE;
+		if ((report->valid == 2 || (report->valid && report->failing >= MAX_FAILURES)) && i != FULL_CHARGE) return STALE;
 	}
 	if (held) return HELD;
 	for (i = 0; i < FIELD_COUNT; i++) {
