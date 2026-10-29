@@ -142,8 +142,8 @@ int main(int argc, char **argv) {
 		if (result == FRESH) {
 			battery = has(&ups, AC_PRESENT) ? !values[AC_PRESENT] || (onlinedischarge_onbattery && values[DISCHARGING]) : values[DISCHARGING] ? 1 : -1;
 			if (battery != last_battery) {
-				if (battery >= 0) {
-					note(battery ? "on battery" : "on mains");
+				if (battery >= 0 || last_battery > 0) {
+					note(battery > 0 ? "on battery" : "on mains");
 				}
 				last_battery = battery;
 			}
