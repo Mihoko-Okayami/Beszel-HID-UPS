@@ -1,9 +1,7 @@
 #include <string.h>
-#include <linux/hid.h>
 
 #include "hidparser.h"
 
-#define MAX_USAGES HID_MAX_DESCRIPTOR_SIZE
 #define MAX_DEPTH 4
 
 enum item {
@@ -37,12 +35,11 @@ struct state {
 	unsigned int id;
 };
 
-static void add_fields(struct ups *ups, const struct state *state, const unsigned int *usages, unsigned int usage_count, unsigned int *bits) {
-	unsigned int i, f, usage;
+static void add_fields(struct ups *ups, const struct state *state, const unsigned int *first, unsigned int *bits) {
+	unsigned int i, f;
 	for (i = 0; state->size && i < state->count && bits[state->id] <= MAX_REPORT * 8; i++) {
-		usage = usage_count ? usages[i < usage_count ? i : usage_count - 1] : 0;
 		for (f = 0; f < FIELD_COUNT; f++) {
-			if (usage != field_usages[f] || ups->fields[f].size) continue;
+			if (first[f] != i || ups->fields[f].size) continue;
 			ups->fields[f].id = state->id;
 			ups->fields[f].offset = bits[state->id];
 			ups->fields[f].size = state->size;
@@ -76,7 +73,8 @@ static int link_reports(struct ups *ups, const unsigned int *bits) {
 
 int parse(struct ups *ups, const unsigned char *desc, unsigned int length) {
 	struct state state = { 0 }, stack[MAX_DEPTH];
-	unsigned int usages[MAX_USAGES], bits[256] = { 0 }, i, k, n, value, depth = 0, usage_count = 0;
+	unsigned int first[FIELD_COUNT], bits[256] = { 0 }, i, k, n, f, value, depth = 0, usage_count = 0;
+	memset(first, 0xff, sizeof(first));
 	memset(ups->fields, 0, sizeof(ups->fields));
 	ups->report_count = 0;
 	for (i = 0; i < length; i += n + 1) {
@@ -117,19 +115,23 @@ int parse(struct ups *ups, const unsigned char *desc, unsigned int length) {
 			}
 			break;
 		case ITEM_USAGE:
-			if (usage_count < MAX_USAGES) {
-				usages[usage_count++] = n == 4 ? value : state.page << 16 | value;
+			value = n == 4 ? value : state.page << 16 | value;
+			for (f = 0; f < FIELD_COUNT; f++) {
+				if (value == field_usages[f] && first[f] > usage_count) {
+					first[f] = usage_count;
+				}
 			}
+			usage_count++;
 			break;
 		case ITEM_FEATURE:
-			add_fields(ups, &state, usages, usage_count, bits);
-			usage_count = 0;
-			break;
+			add_fields(ups, &state, first, bits);
+			__attribute__((fallthrough));
 		case ITEM_INPUT:
 		case ITEM_OUTPUT:
 		case ITEM_COLLECTION:
 		case ITEM_END_COLLECTION:
 			usage_count = 0;
+			memset(first, 0xff, sizeof(first));
 			break;
 		}
 	}
