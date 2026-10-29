@@ -1,9 +1,7 @@
 #define _GNU_SOURCE
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -17,44 +15,27 @@
 
 static char problem[80];
 
-static int is_ups(const char *node, struct ups *ups) {
-	static unsigned char desc[HID_MAX_DESCRIPTOR_SIZE];
-	char path[PATH_MAX];
-	ssize_t length;
-	int fd;
-	snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/report_descriptor", node);
+static int load(unsigned int node, const char *name, void *data, unsigned int size) {
+	char path[64];
+	int fd, length;
+	snprintf(path, sizeof(path), "/sys/class/hidraw/hidraw%u/device/%s", node, name);
 	fd = open(path, O_RDONLY);
 	if (fd < 0) return 0;
-	length = read(fd, desc, sizeof(desc));
+	length = (int)read(fd, data, size);
 	close(fd);
-	return length > 0 && parse(ups, desc, (unsigned int)length);
-}
-
-static void read_model(const char *node, char *model, int size) {
-	char path[PATH_MAX];
-	FILE *file;
-	snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/../../product", node);
-	file = fopen(path, "r");
-	if (!file || !fgets(model, size, file)) {
-		snprintf(model, (size_t)size, "UPS");
-	}
-	if (file) {
-		fclose(file);
-	}
-	model[strcspn(model, "\n")] = '\0';
+	return length > 0 ? length : 0;
 }
 
 int open_ups(struct ups *ups) {
+	static unsigned char desc[HID_MAX_DESCRIPTOR_SIZE];
 	static int told;
-	char path[PATH_MAX];
-	struct dirent *entry;
-	DIR *dir;
-	ups->fd = -1;
-	dir = opendir("/sys/class/hidraw");
-	if (!dir) return 0;
-	while (ups->fd < 0 && (entry = readdir(dir))) {
-		if (strncmp(entry->d_name, "hidraw", 6) || !is_ups(entry->d_name, ups)) continue;
-		snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
+	char path[32];
+	unsigned int node;
+	int length;
+	for (node = 0; ups->fd < 0 && node < HIDRAW_MAX_DEVICES; node++) {
+		length = load(node, "report_descriptor", desc, sizeof(desc));
+		if (!length || !parse(ups, desc, (unsigned int)length)) continue;
+		snprintf(path, sizeof(path), "/dev/hidraw%u", node);
 		ups->fd = open(path, O_RDONLY | O_NONBLOCK);
 		if (ups->fd < 0) {
 			if (!told) {
@@ -64,10 +45,14 @@ int open_ups(struct ups *ups) {
 			continue;
 		}
 		told = 0;
-		read_model(entry->d_name, ups->model, sizeof(ups->model));
-		note("UPS found on %s: %s", entry->d_name, ups->model);
+		length = load(node, "../../product", ups->model, sizeof(ups->model) - 1);
+		ups->model[length] = '\0';
+		ups->model[strcspn(ups->model, "\n")] = '\0';
+		if (!ups->model[0]) {
+			snprintf(ups->model, sizeof(ups->model), "UPS");
+		}
+		note("UPS found on hidraw%u: %s", node, ups->model);
 	}
-	closedir(dir);
 	return ups->fd >= 0;
 }
 
