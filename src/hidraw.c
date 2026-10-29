@@ -47,7 +47,8 @@ int open_ups(struct ups *ups) {
 		told = 0;
 		length = load(node, "../../product", ups->model, sizeof(ups->model) - 1);
 		ups->model[length] = '\0';
-		ups->model[strcspn(ups->model, "\n")] = '\0';
+		for (length = 0; ups->model[length] >= ' ' && ups->model[length] <= '~'; length++) continue;
+		ups->model[length] = '\0';
 		if (!ups->model[0]) {
 			snprintf(ups->model, sizeof(ups->model), "UPS");
 		}
